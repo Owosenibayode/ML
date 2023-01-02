@@ -1,0 +1,249 @@
+
+
+                                                 
+ 
+
+
+Step 1//      */importing the dataset into hdfs using dropbox, created my directory (finalproject) and copy the dataset into it/*
+
+
+                   wget https://www.dropbox.com/s/lqj639ri2fyrmyp/COVID19_cases.csv
+
+                   hadoop fs -mkdir /FinalProject/
+
+                   hadoop fs -copyFromLocal COVID19_cases.csv /FinalProject/
+
+                   hadoop fs -ls /FinalProject/
+
+	
+
+	      -- starting spark-shell --master yarn
+	       
+
+
+ Step 2//        */Importing necessary libraries/*
+
+	          import org.apache.spark.sql.functions._
+
+	          import org.apache.spark.sql.expressions.Window
+
+	          import org.apache.spark.ml.feature.{VectorAssembler, StringIndexer}
+
+	          import org.apache.spark.ml.feature.{VectorAssembler, VectorIndexer}
+
+	          import org.apache.spark.ml.Pipeline
+
+	          import org.apache.spark.ml.classification.{RandomForestClassificationModel, RandomForestClassifier}
+
+	          import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+
+	          import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator}
+
+	          import org.apache.spark.ml.param.ParamMap
+
+	          import org.apache.spark.sql.types.{IntegerType, DoubleType}
+                  import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel,ParamGridBuilder}
+                  import org.apache.spark.ml.feature.{StringIndexer , OneHotEncoder}
+
+
+ Step 3//        */Loading the dataset,and dropping null values/*
+
+                  val Covid_dataset = spark.read.format("csv")
+
+                  .option("header", "true")
+
+                  .load("hdfs://10.128.0.24:8020/FinalProject/COVID19_cases.csv")
+
+                   val cleanDF = Covid_dataset.na.drop()
+
+
+ Step 4//       */ displaying the data frame cleanDF/*
+
+                    cleanDF.head(10)
+
+
+ Step 5//       */checking the schema/*
+
+                  cleanDF.schema(10)
+
+                  cleanDF.show(10)
+
+
+ Step 6//      */Load new dataset with some selected fields and checking the data/*
+
+
+                val finalproject = cleanDF.select(col("Outcome"), 
+
+                col("Age Group"), 
+
+                col("Ever Hospitalized"),
+
+                col("Ever in ICU"),
+
+                col("Ever Intubated"),
+
+                col("Currently Hospitalized"),
+
+                col("Client Gender"))
+                .filter(cleanDF("Classification")==="CONFIRMED")
+
+ 
+Ste6 7//      */ checking the dataset/*
+ 
+                  finalproject.show(10)
+
+
+ Step 8//      */Balancing the Dataset/*
+
+               val fatalityDF = finalproject.filter(finalproject("Outcome")==="FATAL")
+               val nonfatalityDF = finalproject.filter(finalproject("Outcome")==="RESOLVED")
+               val sampleRatio = fatalityDF.count().toDouble/finalproject.count().toDouble
+               val nonfatalitySampleDF = nonfatalityDF.sample(false, sampleRatio)
+               val dfBalanced = fatalityDF.unionAll(nonfatalitySampleDF)
+
+
+ Step 8//      */Displaying the Dataset/*
+
+                 dfBalanced.show(10)
+
+
+ Step 9//      */ Next is to perform indexing on the BalancedDF/*
+
+                val inputColumns = Array("Age Group","Ever Hospitalized", "Ever in ICU","Ever Intubated", "Client Gender") 
+                val outputColumns =Array("Age_index","Hospitalized_index","ICU_index","Intubated_index","Gender_index") 
+                val indexer = new StringIndexer()
+                indexer.setInputCols(inputColumns)
+                indexer.setOutputCols(outputColumns)
+
+                val stringIndexer = new StringIndexer().setInputCol("Outcome").setOutputCol("Outcome_index") 
+                val DF_indexed = indexer.fit(dfBalanced).transform(dfBalanced)
+                val DF_indexed2 = stringIndexer.fit(DF_indexed).transform(DF_indexed) 
+                val rankDf = DF_indexed2.select(col("Outcome_index").cast(IntegerType), 
+                col("Age_index").cast(IntegerType),
+                col("Hospitalized_index").cast(IntegerType), 
+                col("ICU_index").cast(IntegerType), 
+                col("Intubated_index").cast(IntegerType), 
+                col("Gender_index").cast(IntegerType))
+
+ 
+Step 10//     */Showing the rank/*
+
+                 rankDf.show(10)
+
+
+ Step 11//     */Performing OneHotEncoding/*
+
+                val encoder = new OneHotEncoder()
+               .setInputCols(Array("Age_index","Hospitalized_index","ICU_index","Intubated_index","Gender_index"))
+               .setOutputCols(Array("Age_vector","Hospitalized_vector","ICU_vector","Intubated_vector","Gender_vector")) 
+
+
+
+               val DF_Encoder= encoder.fit(rankDf).transform(rankDf)
+
+
+
+ Step 12//    */displaying the dataframe/*
+
+                DF_Encoder.show( 10)
+
+
+ Step 13//    */For my classification, I am going to make use of Random Forest ML Algorithm. Now I split my dataset into
+                training and test data in the ratio 80:20 with a seed of 800/*
+
+
+                val Array(trainingData,testData) = DF_Encoder.randomSplit(Array(0.8,0.2),800)
+
+
+ Step 14//    */Next, wI assembled the features using vector assembler/*
+
+
+                val assembler = new VectorAssembler()
+                .setInputCols(Array("Age_vector","Hospitalized_vector","ICU_vector","Intubated_vector","Gender_vector",
+                "Age_index","Hospitalized_index","ICU_index","Intubated_index" ,"Gender_index")) 
+                .setOutputCol("assembled-features")
+
+
+ Step 15//    */The code below is used to set the new random forest object with given features as a 
+                vector which are the variable that ML algorithm can use. I made use of RandomForestClassifier which passes 
+                over the vectorized assembled features and the normalized class. I also set the seed at 1444/*
+
+                val rf = new RandomForestClassifier()
+               .setFeaturesCol("assembled-features")
+               .setLabelCol("Outcome_index") 
+               .setSeed(1444)
+
+ Step 16//   */The pipeline is set in this stage, I used it to set my stages. 
+               the stages include the vector assembler and the random forest classifier object/*
+
+
+               val pipeline = new Pipeline().setStages(Array(assembler,rf))
+
+
+ Step 17//   */In order for me to evaluate the model, I called the evaluator function which is MulticlassClassificationEvaluator 
+               since I am using a random forest algorithm, I try to compare the Outcome_index to the prediction column to 
+               see how well MY model have learn from the training dataset. The accuracy is the percentage of how accurate the result is/*
+
+
+              val evaluator = new MulticlassClassificationEvaluator()
+              .setLabelCol("Outcome_index")
+              .setPredictionCol("prediction")
+              .setMetricName("accuracy")
+
+
+ Step 18//    */Hyperparameters tunning
+                Hyperparameters are important because they directly control the 
+                behavior of the training algorithm and have a significant impact on the performance of the model being trained. 
+                They also express the complexity and how fast the model should learn from the training set. 
+                Here, I used maxDepth which is an array of two values (number of trees, the depth of the trees). 
+                These values are important as it plays a vital role in the way the algorithm learn before the training. 
+                Here the maxDepth is set at 4 which means that the maximum depth the tree can go during construction. 
+                The tree must not be too deep to avoid over fitting. The impurities are the functions that were used 
+                to measure the quality of the split. Entropy is used in this case/*
+
+
+                val paramGrid = new ParamGridBuilder()
+                .addGrid(rf.maxDepth,Array(3,4)) 
+                .addGrid(rf.impurity,Array("entropy","gini"))
+                .build()
+
+ Step 19//    
+               */Performing and ensembling feature to chose the best model.We cross validated the model, wrapping everything with the cross-validator. 
+                I set the pipeline as an Estimator and Multiclassevaluator for evaluation with the already built 
+                hyper parameters and number of folds to 3 in which case the Cross-validator will divide the training data 
+                into a set of 3. In total, I will have 3 (folds) x 2 (depth) x 2 (algorithms) = 12 models and 
+                the best model is picked/*
+
+                val cross_validator = new CrossValidator()
+                .setEstimator(pipeline)
+                .setEvaluator(evaluator)
+                .setEstimatorParamMaps(paramGrid)
+                .setNumFolds(3)
+
+
+ Step 20//    */Then, I train the model on training data/*
+
+                val cvModel = cross_validator.fit(trainingData) 
+
+
+
+Step 21//     */Predictions is performed on the testData/*
+
+               val predictions = cvModel.transform(testData)
+
+
+ Step 22//    */Final Output is to display our accuracy/*
+
+                val accuracy = evaluator.evaluate(predictions) 
+                println("accuracy on test data="+accuracy)
+
+
+
+
+
+
+
+
+
+
+
